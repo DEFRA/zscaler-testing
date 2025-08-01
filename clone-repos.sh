@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Script to clone repositories from DEFRA GitHub based on defradigital Docker Hub repositories
+# Script to clone all repositories from DEFRA GitHub organization
 # Author: Auto-generated script
 # Date: $(date)
 
-# Note: We don't use 'set -e' because we expect some repositories to not exist on GitHub
+# Note: We don't use 'set -e' because we expect some clone operations might fail
 
 # Colors for output
 RED='\033[0;31m'
@@ -14,10 +14,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-DOCKER_HUB_ORG="defradigital"
 GITHUB_ORG="DEFRA"
 REPOS_DIR="repos"
-DOCKER_HUB_API_URL="https://hub.docker.com/v2/repositories/${DOCKER_HUB_ORG}"
+GITHUB_API_URL="https://api.github.com/orgs/${GITHUB_ORG}/repos"
 
 # Function to print colored output
 print_info() {
@@ -69,35 +68,49 @@ create_repos_directory() {
     fi
 }
 
-# Function to fetch Docker Hub repositories
-fetch_docker_hub_repos() {
+# Function to fetch all GitHub repositories from DEFRA organization
+fetch_github_repos() {
     local page=1
     local per_page=100
     local all_repos=()
     
+    print_info "Fetching repositories from GitHub organization: $GITHUB_ORG"
+    
     while true; do
-        local url="${DOCKER_HUB_API_URL}?page=${page}&page_size=${per_page}"
+        local url="${GITHUB_API_URL}?page=${page}&per_page=${per_page}&type=all"
         
+        print_info "Fetching page $page..."
         local response=$(curl -s "$url" 2>/dev/null)
         if [ $? -ne 0 ]; then
+            print_error "Failed to fetch page $page from GitHub API"
             break
         fi
         
-        local repos=$(echo "$response" | jq -r '.results[].name' 2>/dev/null)
+        # Check if response is an error
+        local error_message=$(echo "$response" | jq -r '.message // empty' 2>/dev/null)
+        if [ -n "$error_message" ]; then
+            print_error "GitHub API error: $error_message"
+            break
+        fi
+        
+        local repos=$(echo "$response" | jq -r '.[].name' 2>/dev/null)
         
         if [ -z "$repos" ] || [ "$repos" = "null" ]; then
             break
         fi
         
+        local repo_count=0
         while IFS= read -r repo; do
             if [ -n "$repo" ] && [ "$repo" != "null" ]; then
                 all_repos+=("$repo")
+                ((repo_count++))
             fi
         done <<< "$repos"
         
-        # Check if there are more pages
-        local next=$(echo "$response" | jq -r '.next' 2>/dev/null)
-        if [ "$next" = "null" ] || [ -z "$next" ]; then
+        print_info "Found $repo_count repositories on page $page"
+        
+        # If we got fewer repositories than per_page, we're on the last page
+        if [ $repo_count -lt $per_page ]; then
             break
         fi
         
@@ -106,19 +119,6 @@ fetch_docker_hub_repos() {
     
     # Output only the repository names, one per line
     printf '%s\n' "${all_repos[@]}"
-}
-
-# Function to check if GitHub repository exists
-github_repo_exists() {
-    local repo_name=$1
-    local github_url="https://github.com/${GITHUB_ORG}/${repo_name}"
-    
-    # Use curl with timeout and only check headers
-    if curl -s --max-time 10 --head "$github_url" | head -n 1 | grep -q "200"; then
-        return 0
-    else
-        return 1
-    fi
 }
 
 # Function to clone a repository
@@ -130,12 +130,6 @@ clone_repository() {
     if [ -d "$target_dir" ]; then
         print_warning "Repository $repo_name already exists in $target_dir. Skipping..."
         return 2  # Return 2 for "already exists"
-    fi
-    
-    print_info "Checking if GitHub repository exists: $repo_name"
-    if ! github_repo_exists "$repo_name"; then
-        print_warning "GitHub repository $repo_name does not exist in $GITHUB_ORG organization. Skipping..."
-        return 1  # Return 1 for "not found"
     fi
     
     print_info "Cloning repository: $repo_name"
@@ -157,9 +151,9 @@ display_summary() {
     
     echo
     print_info "=== SUMMARY ==="
-    echo "Total repositories found in Docker Hub: $total"
+    echo "Total repositories found in GitHub organization: $total"
     echo "Successfully cloned: $successful"
-    echo "Skipped (not found on GitHub or already exists): $skipped"
+    echo "Skipped (already exists): $skipped"
     echo "Failed to clone: $failed"
     echo
     
@@ -175,7 +169,6 @@ display_summary() {
 # Main function
 main() {
     print_info "Starting repository cloning process..."
-    print_info "Docker Hub Organization: $DOCKER_HUB_ORG"
     print_info "GitHub Organization: $GITHUB_ORG"
     echo
     
@@ -185,33 +178,33 @@ main() {
     # Create repos directory
     create_repos_directory
     
-    # Fetch Docker Hub repositories
-    print_info "Fetching repositories from Docker Hub organization: $DOCKER_HUB_ORG"
-    local docker_repos_output
-    docker_repos_output=$(fetch_docker_hub_repos)
+    # Fetch GitHub repositories
+    print_info "Fetching all repositories from GitHub organization: $GITHUB_ORG"
+    local github_repos_output
+    github_repos_output=$(fetch_github_repos)
     
-    if [ $? -ne 0 ] || [ -z "$docker_repos_output" ]; then
-        print_error "Failed to fetch repositories from Docker Hub organization: $DOCKER_HUB_ORG"
+    if [ $? -ne 0 ] || [ -z "$github_repos_output" ]; then
+        print_error "Failed to fetch repositories from GitHub organization: $GITHUB_ORG"
         exit 1
     fi
     
     # Convert output to array
-    local docker_repos=()
+    local github_repos=()
     while IFS= read -r line; do
         if [ -n "$line" ]; then
-            docker_repos+=("$line")
+            github_repos+=("$line")
         fi
-    done <<< "$docker_repos_output"
+    done <<< "$github_repos_output"
     
-    if [ ${#docker_repos[@]} -eq 0 ]; then
-        print_error "No repositories found in Docker Hub organization: $DOCKER_HUB_ORG"
+    if [ ${#github_repos[@]} -eq 0 ]; then
+        print_error "No repositories found in GitHub organization: $GITHUB_ORG"
         exit 1
     fi
     
-    print_success "Found ${#docker_repos[@]} repositories in Docker Hub organization."
+    print_success "Found ${#github_repos[@]} repositories in GitHub organization."
     
     # Clone repositories
-    local total=${#docker_repos[@]}
+    local total=${#github_repos[@]}
     local successful=0
     local failed=0
     local skipped=0
@@ -219,7 +212,7 @@ main() {
     print_info "Starting to clone $total repositories..."
     echo
     
-    for repo in "${docker_repos[@]}"; do
+    for repo in "${github_repos[@]}"; do
         print_info "Processing repository: $repo"
         
         clone_repository "$repo"
@@ -228,9 +221,6 @@ main() {
         case $result in
             0)
                 ((successful++))
-                ;;
-            1)
-                ((skipped++))  # Repository not found on GitHub
                 ;;
             2)
                 ((skipped++))  # Repository already exists locally
