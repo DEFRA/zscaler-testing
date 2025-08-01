@@ -1,4 +1,4 @@
-# Zscaler Testing Repository
+# Zscaler Testing
 
 This repository is intended to test for potential conflicts with Zscaler in software development environments. It contains automated scripts to systematically test Docker builds and Node.js package installations across a comprehensive collection of DEFRA repositories to identify any issues that may arise when using Zscaler network security solutions.
 
