@@ -78,9 +78,10 @@ find_package_json_files() {
     local package_files=()
     
     # Look for package.json files in the repository (up to 3 levels deep)
+    # Exclude node_modules, .git, and other common directories
     while IFS= read -r -d '' package_file; do
         package_files+=("$package_file")
-    done < <(find "$repo_path" -maxdepth 3 -type f -name "package.json" -print0 2>/dev/null)
+    done < <(find "$repo_path" -maxdepth 3 -type f -name "package.json" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/build/*" -print0 2>/dev/null)
     
     printf '%s\n' "${package_files[@]}"
 }
@@ -266,7 +267,10 @@ main() {
     local repositories=()
     while IFS= read -r -d '' repo; do
         repo_name=$(basename "$repo")
-        repositories+=("$repo_name")
+        # Skip non-repository directories
+        if [[ "$repo_name" != "npm_install_logs" && "$repo_name" != "docker_build_logs" && "$repo_name" != "." ]]; then
+            repositories+=("$repo_name")
+        fi
     done < <(find "$REPOS_DIR" -maxdepth 1 -type d ! -name "$REPOS_DIR" -print0 2>/dev/null)
     
     if [ ${#repositories[@]} -eq 0 ]; then
