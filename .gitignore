@@ -1,0 +1,4 @@
+repos/
+npm_install_logs
+build_logs
+*.txt
