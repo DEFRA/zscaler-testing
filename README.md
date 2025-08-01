@@ -17,7 +17,7 @@ This testing suite helps identify and document such issues by running realistic 
 The testing approach follows a systematic three-phase methodology:
 
 ### 1. Repository Discovery and Cloning
-Retrieve all public images from Docker Hub (specifically from the `defradigital` organization) including those for real CDP (Core Delivery Platform) hosted services, then clone the corresponding source repositories from the DEFRA GitHub organization.
+Retrieve all public images from DEFRA GitHub organization.
 
 ### 2. Docker Build Testing
 For all repositories containing a Dockerfile, build the Docker image and report any issues that may arise due to network restrictions, certificate validation problems, or other Zscaler-related interference.
@@ -31,9 +31,8 @@ For all Node.js repositories (containing `package.json` files), run `npm install
 **Purpose**: Discovers and clones repositories for testing
 
 **Features**:
-- Fetches repository list from Docker Hub API (`https://hub.docker.com/v2/repositories/defradigital`)
-- Checks for corresponding repositories in the DEFRA GitHub organization
-- Clones repositories that exist in both Docker Hub and GitHub
+- Fetches repository list from DEFRA GitHub organization
+- Clones all repositories
 - Comprehensive logging of successful clones and missing repositories
 
 **Usage**:
