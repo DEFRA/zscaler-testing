@@ -138,6 +138,18 @@ run_npm_install() {
     if [ $install_exit_code -eq 0 ]; then
         echo
         print_success "Successfully completed npm install for $repo_name"
+        
+        # Clean up node_modules to save disk space
+        if [ -d "node_modules" ]; then
+            print_info "Cleaning up node_modules to save disk space..."
+            rm -rf node_modules
+            if [ $? -eq 0 ]; then
+                print_success "Successfully removed node_modules folder"
+            else
+                print_warning "Failed to remove node_modules folder"
+            fi
+        fi
+        
         ((GLOBAL_INSTALLS_SUCCESSFUL++))
         return 0
     else
