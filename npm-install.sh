@@ -107,6 +107,17 @@ run_npm_install() {
     # Change to the directory containing the package.json
     cd "$package_dir" || return 1
     
+    # Clean up any existing node_modules before starting
+    if [ -d "node_modules" ]; then
+        print_info "Removing existing node_modules folder for clean test..."
+        rm -rf node_modules
+        if [ $? -eq 0 ]; then
+            print_success "Successfully removed existing node_modules folder"
+        else
+            print_warning "Failed to remove existing node_modules folder"
+        fi
+    fi
+    
     # Create log file header
     echo "NPM Install log for $repo_name - $(date)" > "$install_log_file"
     echo "Package.json: $package_json_path" >> "$install_log_file"
