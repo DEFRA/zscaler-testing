@@ -125,11 +125,11 @@ build_docker_image() {
     
     if [ "$dockerfile_name" = "Dockerfile" ]; then
         # Standard Dockerfile name - show live output and save to log
-        timeout "$BUILD_TIMEOUT" docker build -t "$full_image_name" . 2>&1 | tee -a "$build_log_file"
+        timeout "$BUILD_TIMEOUT" docker build --no-cache -t "$full_image_name" . 2>&1 | tee -a "$build_log_file"
         build_exit_code=${PIPESTATUS[0]}
     else
         # Custom Dockerfile name - show live output and save to log
-        timeout "$BUILD_TIMEOUT" docker build -f "$dockerfile_name" -t "$full_image_name" . 2>&1 | tee -a "$build_log_file"
+        timeout "$BUILD_TIMEOUT" docker build --no-cache -f "$dockerfile_name" -t "$full_image_name" . 2>&1 | tee -a "$build_log_file"
         build_exit_code=${PIPESTATUS[0]}
     fi
     
