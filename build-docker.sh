@@ -16,6 +16,8 @@ REPOS_DIR="repos"
 ERRORS_FILE="docker_build_errors.txt"
 BUILD_LOG_DIR="build_logs"
 BUILD_TIMEOUT=600  # 10 minutes timeout for each build
+PROGRESS_FILE="docker_build_progress.txt"
+QUEUE_FILE="docker_build_queue.txt"
 
 # Global counters
 GLOBAL_BUILDS_SUCCESSFUL=0
@@ -62,12 +64,90 @@ initialize_logs() {
     # Create build logs directory
     mkdir -p "$BUILD_LOG_DIR"
     
-    # Initialize or clear the errors file
-    echo "Docker Build Errors Report - $(date)" > "$ERRORS_FILE"
-    echo "=================================================" >> "$ERRORS_FILE"
-    echo "" >> "$ERRORS_FILE"
+    # Initialize or clear the errors file only if starting fresh
+    if [ ! -f "$PROGRESS_FILE" ]; then
+        echo "Docker Build Errors Report - $(date)" > "$ERRORS_FILE"
+        echo "=================================================" >> "$ERRORS_FILE"
+        echo "" >> "$ERRORS_FILE"
+    fi
     
     print_success "Log files initialized."
+}
+
+# Function to create or load progress queue
+initialize_queue() {
+    if [ -f "$QUEUE_FILE" ] && [ -f "$PROGRESS_FILE" ]; then
+        print_info "Found existing progress. Resuming from where we left off..."
+        local completed_count=$(wc -l < "$PROGRESS_FILE" 2>/dev/null || echo 0)
+        local remaining_count=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Completed: $completed_count builds, Remaining: $remaining_count builds"
+        return 0
+    else
+        print_info "Starting fresh - creating new queue..."
+        # Clear any existing progress files
+        > "$PROGRESS_FILE"
+        > "$QUEUE_FILE"
+        
+        # Get list of repositories and create queue
+        local repositories=()
+        while IFS= read -r -d '' repo; do
+            repo_name=$(basename "$repo")
+            # Skip non-repository directories
+            if [[ "$repo_name" != "npm_install_logs" && "$repo_name" != "docker_build_logs" && "$repo_name" != "build_logs" && "$repo_name" != "." ]]; then
+                repositories+=("$repo_name")
+            fi
+        done < <(find "$REPOS_DIR" -maxdepth 1 -type d ! -name "$REPOS_DIR" -print0 2>/dev/null)
+        
+        # Add repositories with Dockerfiles to queue
+        for repo_name in "${repositories[@]}"; do
+            local repo_path="${REPOS_DIR}/${repo_name}"
+            local dockerfiles
+            dockerfiles=($(find_dockerfiles "$repo_path"))
+            
+            for dockerfile in "${dockerfiles[@]}"; do
+                echo "${repo_name}|${dockerfile}" >> "$QUEUE_FILE"
+            done
+        done
+        
+        local total_items=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Created queue with $total_items Docker build tasks"
+        return 0
+    fi
+}
+
+# Function to get next item from queue
+get_next_from_queue() {
+    if [ ! -f "$QUEUE_FILE" ] || [ ! -s "$QUEUE_FILE" ]; then
+        return 1  # Queue is empty
+    fi
+    
+    # Get first line from queue
+    local next_item=$(head -n 1 "$QUEUE_FILE")
+    
+    # Remove first line from queue
+    sed -i '1d' "$QUEUE_FILE"
+    
+    echo "$next_item"
+    return 0
+}
+
+# Function to mark item as completed
+mark_completed() {
+    local repo_name=$1
+    local dockerfile_path=$2
+    local status=$3
+    
+    echo "$(date)|${repo_name}|${dockerfile_path}|${status}" >> "$PROGRESS_FILE"
+}
+
+# Function to clean up successful log files
+cleanup_successful_log() {
+    local log_file=$1
+    
+    if [ -f "$log_file" ]; then
+        print_info "Removing successful build log: $(basename "$log_file")"
+        rm -f "$log_file"
+    fi
 }
 
 # Function to find Dockerfiles in a repository
@@ -157,6 +237,9 @@ build_docker_image() {
         else
             print_warning "Failed to remove image $full_image_name"
         fi
+        
+        # Clean up successful log file
+        cleanup_successful_log "$build_log_file"
         
         return 0
     else
@@ -282,63 +365,71 @@ main() {
         exit 1
     fi
     
-    # Get list of repositories
-    local repositories=()
-    while IFS= read -r -d '' repo; do
-        repo_name=$(basename "$repo")
-        repositories+=("$repo_name")
-    done < <(find "$REPOS_DIR" -maxdepth 1 -type d ! -name "$REPOS_DIR" -print0 2>/dev/null)
+    # Initialize or load queue
+    initialize_queue
     
-    if [ ${#repositories[@]} -eq 0 ]; then
-        print_error "No repositories found in '$REPOS_DIR' directory."
-        exit 1
-    fi
+    # Process queue
+    local total_processed=0
+    local queue_item
     
-    print_info "Found ${#repositories[@]} repositories to process."
-    echo
-    
-    # Initialize counters
-    local total_repos=${#repositories[@]}
-    local repos_with_dockerfiles=0
-    local repos_processed=0
-    local total_builds_attempted=0
-    local total_builds_successful=0
-    local total_builds_failed=0
-    
-    # Process each repository
-    for repo_name in "${repositories[@]}"; do
-        print_info "=== Processing Repository: $repo_name ==="
-        
-        # Count Dockerfiles in this repo
-        local repo_path="${REPOS_DIR}/${repo_name}"
-        local dockerfiles
-        dockerfiles=($(find_dockerfiles "$repo_path"))
-        local dockerfile_count=${#dockerfiles[@]}
-        
-        if [ $dockerfile_count -gt 0 ]; then
-            ((repos_with_dockerfiles++))
-            ((total_builds_attempted += dockerfile_count))
-            
-            # Process the repository
-            if process_repository "$repo_name"; then
-                ((repos_processed++))
-            fi
-        else
-            print_warning "No Dockerfiles found in $repo_name"
+    while queue_item=$(get_next_from_queue); do
+        if [ -z "$queue_item" ]; then
+            break
         fi
+        
+        # Parse queue item: repo_name|dockerfile_path
+        local repo_name=$(echo "$queue_item" | cut -d'|' -f1)
+        local dockerfile_path=$(echo "$queue_item" | cut -d'|' -f2)
+        
+        print_info "=== Processing: $repo_name ($(basename "$dockerfile_path")) ==="
+        print_info "Repository: $repo_name"
+        print_info "Dockerfile: $dockerfile_path"
+        
+        # Run Docker build for this specific Dockerfile
+        if build_docker_image "$repo_name" "$dockerfile_path" "${REPOS_DIR}/${repo_name}"; then
+            mark_completed "$repo_name" "$dockerfile_path" "SUCCESS"
+        else
+            mark_completed "$repo_name" "$dockerfile_path" "FAILED"
+        fi
+        
+        ((total_processed++))
+        
+        # Show progress
+        local remaining=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Progress: $total_processed completed, $remaining remaining"
         
         echo
         echo "================================================="
         echo
     done
     
-    # Use global counters for final summary
-    total_builds_successful=$GLOBAL_BUILDS_SUCCESSFUL
-    total_builds_failed=$GLOBAL_BUILDS_FAILED
-    
     # Display final summary
-    display_summary "$total_repos" "$repos_with_dockerfiles" "$repos_processed" \
-                   "$total_builds_attempted" "$total_builds_successful" "$total_builds_failed"
+    local total_completed=$(wc -l < "$PROGRESS_FILE" 2>/dev/null || echo 0)
+    local successful_count=$(grep "|SUCCESS$" "$PROGRESS_FILE" 2>/dev/null | wc -l || echo 0)
+    local failed_count=$(grep "|FAILED$" "$PROGRESS_FILE" 2>/dev/null | wc -l || echo 0)
+    
+    echo
+    print_info "=== FINAL SUMMARY ==="
+    echo "Total Docker builds completed: $total_completed"
+    echo "Successful builds: $successful_count"
+    echo "Failed builds: $failed_count"
+    echo
+    
+    if [ $failed_count -gt 0 ]; then
+        print_warning "Build errors have been logged to: $ERRORS_FILE"
+        print_info "Failed build logs are available in: $BUILD_LOG_DIR/"
+    fi
+    
+    if [ $successful_count -gt 0 ]; then
+        print_success "All successful Docker builds completed and logs cleaned up."
+    fi
+    
+    # Clean up queue files if everything is done
+    if [ ! -s "$QUEUE_FILE" ]; then
+        print_info "All tasks completed. Cleaning up queue files..."
+        rm -f "$QUEUE_FILE" "$PROGRESS_FILE"
+        print_success "Queue cleanup complete. Run script again to start fresh."
+    fi
 }
 
 # Run the script

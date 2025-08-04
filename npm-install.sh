@@ -16,6 +16,8 @@ REPOS_DIR="repos"
 ERRORS_FILE="npm_install_errors.txt"
 INSTALL_LOG_DIR="npm_install_logs"
 INSTALL_TIMEOUT=600  # 10 minutes timeout for each npm install
+PROGRESS_FILE="npm_install_progress.txt"
+QUEUE_FILE="npm_install_queue.txt"
 
 # Global counters
 GLOBAL_INSTALLS_SUCCESSFUL=0
@@ -64,12 +66,90 @@ initialize_logs() {
     # Create install logs directory
     mkdir -p "$INSTALL_LOG_DIR"
     
-    # Initialize or clear the errors file
-    echo "NPM Install Errors Report - $(date)" > "$ERRORS_FILE"
-    echo "=================================================" >> "$ERRORS_FILE"
-    echo "" >> "$ERRORS_FILE"
+    # Initialize or clear the errors file only if starting fresh
+    if [ ! -f "$PROGRESS_FILE" ]; then
+        echo "NPM Install Errors Report - $(date)" > "$ERRORS_FILE"
+        echo "=================================================" >> "$ERRORS_FILE"
+        echo "" >> "$ERRORS_FILE"
+    fi
     
     print_success "Log files initialized."
+}
+
+# Function to create or load progress queue
+initialize_queue() {
+    if [ -f "$QUEUE_FILE" ] && [ -f "$PROGRESS_FILE" ]; then
+        print_info "Found existing progress. Resuming from where we left off..."
+        local completed_count=$(wc -l < "$PROGRESS_FILE" 2>/dev/null || echo 0)
+        local remaining_count=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Completed: $completed_count repositories, Remaining: $remaining_count repositories"
+        return 0
+    else
+        print_info "Starting fresh - creating new queue..."
+        # Clear any existing progress files
+        > "$PROGRESS_FILE"
+        > "$QUEUE_FILE"
+        
+        # Get list of repositories and create queue
+        local repositories=()
+        while IFS= read -r -d '' repo; do
+            repo_name=$(basename "$repo")
+            # Skip non-repository directories
+            if [[ "$repo_name" != "npm_install_logs" && "$repo_name" != "docker_build_logs" && "$repo_name" != "build_logs" && "$repo_name" != "." ]]; then
+                repositories+=("$repo_name")
+            fi
+        done < <(find "$REPOS_DIR" -maxdepth 1 -type d ! -name "$REPOS_DIR" -print0 2>/dev/null)
+        
+        # Add repositories with package.json files to queue
+        for repo_name in "${repositories[@]}"; do
+            local repo_path="${REPOS_DIR}/${repo_name}"
+            local package_files
+            package_files=($(find_package_json_files "$repo_path"))
+            
+            for package_file in "${package_files[@]}"; do
+                echo "${repo_name}|${package_file}" >> "$QUEUE_FILE"
+            done
+        done
+        
+        local total_items=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Created queue with $total_items npm install tasks"
+        return 0
+    fi
+}
+
+# Function to get next item from queue
+get_next_from_queue() {
+    if [ ! -f "$QUEUE_FILE" ] || [ ! -s "$QUEUE_FILE" ]; then
+        return 1  # Queue is empty
+    fi
+    
+    # Get first line from queue
+    local next_item=$(head -n 1 "$QUEUE_FILE")
+    
+    # Remove first line from queue
+    sed -i '1d' "$QUEUE_FILE"
+    
+    echo "$next_item"
+    return 0
+}
+
+# Function to mark item as completed
+mark_completed() {
+    local repo_name=$1
+    local package_json_path=$2
+    local status=$3
+    
+    echo "$(date)|${repo_name}|${package_json_path}|${status}" >> "$PROGRESS_FILE"
+}
+
+# Function to clean up successful log files
+cleanup_successful_log() {
+    local log_file=$1
+    
+    if [ -f "$log_file" ]; then
+        print_info "Removing successful install log: $(basename "$log_file")"
+        rm -f "$log_file"
+    fi
 }
 
 # Function to find package.json files in a repository
@@ -160,6 +240,9 @@ run_npm_install() {
                 print_warning "Failed to remove node_modules folder"
             fi
         fi
+        
+        # Clean up successful log file
+        cleanup_successful_log "$install_log_file"
         
         ((GLOBAL_INSTALLS_SUCCESSFUL++))
         return 0
@@ -286,64 +369,71 @@ main() {
         exit 1
     fi
     
-    # Get list of repositories
-    local repositories=()
-    while IFS= read -r -d '' repo; do
-        repo_name=$(basename "$repo")
-        # Skip non-repository directories
-        if [[ "$repo_name" != "npm_install_logs" && "$repo_name" != "docker_build_logs" && "$repo_name" != "." ]]; then
-            repositories+=("$repo_name")
+    # Initialize or load queue
+    initialize_queue
+    
+    # Process queue
+    local total_processed=0
+    local queue_item
+    
+    while queue_item=$(get_next_from_queue); do
+        if [ -z "$queue_item" ]; then
+            break
         fi
-    done < <(find "$REPOS_DIR" -maxdepth 1 -type d ! -name "$REPOS_DIR" -print0 2>/dev/null)
-    
-    if [ ${#repositories[@]} -eq 0 ]; then
-        print_error "No repositories found in '$REPOS_DIR' directory."
-        exit 1
-    fi
-    
-    print_info "Found ${#repositories[@]} repositories to process."
-    echo
-    
-    # Initialize counters
-    local total_repos=${#repositories[@]}
-    local repos_with_package_json=0
-    local repos_processed=0
-    local total_installs_attempted=0
-    
-    # Process each repository
-    for repo_name in "${repositories[@]}"; do
-        print_info "=== Processing Repository: $repo_name ==="
         
-        # Count package.json files in this repo
-        local repo_path="${REPOS_DIR}/${repo_name}"
-        local package_files
-        package_files=($(find_package_json_files "$repo_path"))
-        local package_count=${#package_files[@]}
+        # Parse queue item: repo_name|package_json_path
+        local repo_name=$(echo "$queue_item" | cut -d'|' -f1)
+        local package_json_path=$(echo "$queue_item" | cut -d'|' -f2)
         
-        if [ $package_count -gt 0 ]; then
-            ((repos_with_package_json++))
-            ((total_installs_attempted += package_count))
-            
-            # Process the repository
-            if process_repository "$repo_name"; then
-                ((repos_processed++))
-            fi
+        print_info "=== Processing: $repo_name ($(basename "$package_json_path")) ==="
+        print_info "Repository: $repo_name"
+        print_info "Package.json: $package_json_path"
+        
+        # Run npm install for this specific package.json
+        if run_npm_install "$repo_name" "$package_json_path" "${REPOS_DIR}/${repo_name}"; then
+            mark_completed "$repo_name" "$package_json_path" "SUCCESS"
         else
-            print_warning "No package.json files found in $repo_name"
+            mark_completed "$repo_name" "$package_json_path" "FAILED"
         fi
+        
+        ((total_processed++))
+        
+        # Show progress
+        local remaining=$(wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0)
+        print_info "Progress: $total_processed completed, $remaining remaining"
         
         echo
         echo "================================================="
         echo
     done
     
-    # Use global counters for final summary
-    local total_installs_successful=$GLOBAL_INSTALLS_SUCCESSFUL
-    local total_installs_failed=$GLOBAL_INSTALLS_FAILED
-    
     # Display final summary
-    display_summary "$total_repos" "$repos_with_package_json" "$repos_processed" \
-                   "$total_installs_attempted" "$total_installs_successful" "$total_installs_failed"
+    local total_completed=$(wc -l < "$PROGRESS_FILE" 2>/dev/null || echo 0)
+    local successful_count=$(grep "|SUCCESS$" "$PROGRESS_FILE" 2>/dev/null | wc -l || echo 0)
+    local failed_count=$(grep "|FAILED$" "$PROGRESS_FILE" 2>/dev/null | wc -l || echo 0)
+    
+    echo
+    print_info "=== FINAL SUMMARY ==="
+    echo "Total npm installs completed: $total_completed"
+    echo "Successful installs: $successful_count"
+    echo "Failed installs: $failed_count"
+    echo
+    
+    if [ $failed_count -gt 0 ]; then
+        print_warning "Install errors have been logged to: $ERRORS_FILE"
+        print_info "Failed install logs are available in: $INSTALL_LOG_DIR/"
+    fi
+    
+    if [ $successful_count -gt 0 ]; then
+        print_success "All successful npm installs completed and logs cleaned up."
+    fi
+    
+    # Clean up queue files if everything is done
+    if [ ! -s "$QUEUE_FILE" ]; then
+        print_info "All tasks completed. Cleaning up queue files..."
+        rm -f "$QUEUE_FILE" "$PROGRESS_FILE"
+        print_success "Queue cleanup complete. Run script again to start fresh."
+    fi
 }
 
 # Run the script
