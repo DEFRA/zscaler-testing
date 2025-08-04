@@ -1,11 +1,11 @@
 {
-    "git.ignoredRepositories": [
-        "repos/**"
-    ],
-    "files.watcherExclude": {
-        "repos/**": true
-    },
-    "search.exclude": {
-        "repos/**": true
-    }
+  "git.ignoredRepositories": [
+    "repos/**"
+  ],
+  "files.watcherExclude": {
+    "repos/**": true
+  },
+  "search.exclude": {
+    "repos/**": true
+  }
 }
